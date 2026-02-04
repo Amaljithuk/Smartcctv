@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Distribution / Packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Model Weights
+*.pt
+*.pth
+*.onnx
+
+# Media / Test Assets
+*.mp4
+*.avi
+*.jpg
+*.jpeg
+*.png
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Editor directories
+.idea/
+.vscode/
+
+# Frontend (Node/Next.js) - in case nested ignore needs backup or simple ignore
+node_modules/
+.next/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
