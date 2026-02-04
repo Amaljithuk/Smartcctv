@@ -7,7 +7,9 @@ import torch
 from collections import defaultdict
 from ultralytics import YOLO
 from deep_sort_realtime.deepsort_tracker import DeepSort
+from facenet_pytorch import MTCNN, InceptionResnetV1
 import detection_ops 
+from backend import database
 
 # Configuration
 VIDEO_SOURCE = "test_video.mp4" 
@@ -23,7 +25,8 @@ SETTINGS = {
 
 def main():
     use_cuda = torch.cuda.is_available()
-    device = '0' if use_cuda else 'cpu'
+    device = 'cuda' if use_cuda else 'cpu'
+    yolo_device = '0' if use_cuda else 'cpu'
     print(f"System Check: {'GPU Detected (CUDA)' if use_cuda else 'CPU Only'}")
 
     print("Initializing Models...")
@@ -35,6 +38,17 @@ def main():
         nms_max_overlap=1.0, 
         embedder_gpu=use_cuda
     )
+    
+    # Initialize Face Recognition Models
+    print("Initializing Face Recognition...")
+    mtcnn = MTCNN(keep_all=True, device=device) # keep_all=True to find all faces in crop if multiple
+    resnet = InceptionResnetV1(pretrained='vggface2').eval().to(device)
+    
+    # Load Trusted Faces
+    database.init_db()
+    known_faces = database.get_trusted_faces()
+    print(f"Loaded {len(known_faces)} trusted faces.")
+    
     print("Models Initialized.")
 
     cap = cv2.VideoCapture(VIDEO_SOURCE)
@@ -44,6 +58,7 @@ def main():
 
     track_history = defaultdict(list)
     loitering_saved = defaultdict(lambda: False)
+    saved_untrusted_session = set()
     
     fps = int(cap.get(cv2.CAP_PROP_FPS))
     if fps == 0: fps = 30
@@ -63,6 +78,11 @@ def main():
         frame_count += 1
         current_time = frame_count / fps
         process_frame = frame 
+        
+        # Reload known faces periodically explicitly or on event?
+        # For now, we assume static until restart, or we can reload every 100 frames.
+        if frame_count % 300 == 0:
+            known_faces = database.get_trusted_faces()
 
         detections_list = []
         
@@ -71,7 +91,7 @@ def main():
             process_frame, 
             stream=True, 
             conf=SETTINGS['confidence_threshold'], 
-            device=device,
+            device=yolo_device,
             imgsz=640, 
             verbose=False
         )
@@ -91,22 +111,20 @@ def main():
         # Deepsort Tracker Update
         outputs = deepsort_tracker.update_tracks(detections_list, frame=process_frame)
 
-        final_frame, alerts = detection_ops.process_frame_annotations(
+        # Run detection ops with face recognition
+        final_frame, alerts, saved_untrusted_session = detection_ops.process_frame_annotations(
             process_frame, 
             outputs, 
             current_time, 
             track_history,
             loitering_saved,
-            SETTINGS
+            SETTINGS,
+            mtcnn=mtcnn,
+            resnet=resnet,
+            known_faces=known_faces,
+            device=device,
+            saved_untrusted_session=saved_untrusted_session
         )
-
-        # Console Output
-        # if alerts['count'] > 0:
-        #     console_msg = [f"Frame {frame_count}: Detected {alerts['count']} people."]
-        #     if alerts['trespassing']: console_msg.append("Trespassing Alert")
-        #     if alerts['crowd']: console_msg.append("Crowd Alert")
-        #     if alerts['loitering']: console_msg.append("Loitering Alert")
-        #     print("\n".join(console_msg))
 
         cv2.imshow(window_name, final_frame)
 

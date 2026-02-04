@@ -6,6 +6,7 @@ import os
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from collections import defaultdict
 from ultralytics import YOLO
 from deep_sort_realtime.deepsort_tracker import DeepSort
@@ -15,6 +16,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import detection_ops
 from backend.alert_utils import AlertManager
+from backend import api
 
 app = FastAPI()
 
@@ -27,6 +29,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Startups ensure directories exist
+if not os.path.exists("captured_faces"):
+    os.makedirs("captured_faces")
+if not os.path.exists("trusted_faces"):
+    os.makedirs("trusted_faces")
+
+app.mount("/captured_faces", StaticFiles(directory="captured_faces"), name="captured_faces")
+app.mount("/trusted_faces", StaticFiles(directory="trusted_faces"), name="trusted_faces")
+
+app.include_router(api.router)
+
 # Global State
 class VideoState:
     def __init__(self):
@@ -37,7 +50,7 @@ class VideoState:
         
         # Models
         self.use_cuda = torch.cuda.is_available()
-        self.device = '0' if self.use_cuda else 'cpu'
+        self.device = 'cuda' if self.use_cuda else 'cpu'
         print("Loading YOLO...")
         self.yolo_model = YOLO("yolov8s.pt")
         print("Loading DeepSort...")
@@ -45,9 +58,27 @@ class VideoState:
             max_age=30, n_init=1, nms_max_overlap=1.0, embedder_gpu=self.use_cuda
         )
         
+        # Face Recognition
+        try:
+            from facenet_pytorch import MTCNN, InceptionResnetV1
+            from backend import database
+            print("Loading Face Recognition Models...")
+            self.mtcnn = MTCNN(keep_all=True, device=self.device)
+            self.resnet = InceptionResnetV1(pretrained='vggface2').eval().to(self.device)
+            
+            database.init_db()
+            self.known_faces = database.get_trusted_faces()
+            print(f"Loaded {len(self.known_faces)} trusted faces.")
+        except Exception as e:
+            print(f"Face Recognition Init Error: {e}")
+            self.mtcnn = None
+            self.resnet = None
+            self.known_faces = []
+
         # State trackers
         self.track_history = defaultdict(list)
         self.loitering_saved = defaultdict(lambda: False)
+        self.saved_untrusted_session = set()
         self.frame_count = 0
         
         # Settings
@@ -81,8 +112,14 @@ def get_video_capture():
         state.frame_count = 0
         state.track_history.clear()
         state.loitering_saved.clear()
+        state.saved_untrusted_session.clear()
         # Reset tracker on new source otherwise it gets confused
         state.deepsort_tracker.delete_all_tracks()
+        
+        # Refresh trusted faces on restart/reload
+        if state.mtcnn:
+            from backend import database
+            state.known_faces = database.get_trusted_faces()
         
     return state.cap
 
@@ -110,7 +147,7 @@ def generate_frames():
         detections_list = []
         results = state.yolo_model(
             frame, stream=True, conf=state.settings['confidence_threshold'], 
-            device=state.device, imgsz=640, verbose=False
+            device=state.device if state.device == 'cpu' else 0, imgsz=640, verbose=False
         )
         
         for result in results:
@@ -133,9 +170,14 @@ def generate_frames():
         current_settings = state.settings.copy()
         current_settings['trespassing_zone'] = tuple(state.settings['trespassing_zone'])
         
-        final_frame, alerts = detection_ops.process_frame_annotations(
+        final_frame, alerts, state.saved_untrusted_session = detection_ops.process_frame_annotations(
             frame, tracks, current_time, 
-            state.track_history, state.loitering_saved, current_settings
+            state.track_history, state.loitering_saved, current_settings,
+            mtcnn=state.mtcnn,
+            resnet=state.resnet,
+            known_faces=state.known_faces,
+            device=state.device,
+            saved_untrusted_session=state.saved_untrusted_session
         )
         
         # Process Alerts
